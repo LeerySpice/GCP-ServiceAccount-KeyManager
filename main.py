@@ -1,114 +1,121 @@
-import functions_framework
+from flask import Flask, request, jsonify
 from google.oauth2 import service_account
-import googleapiclient.discovery  # type: ignore
+import googleapiclient.discovery
 from google.cloud import secretmanager
 import json
 
-@functions_framework.http
-def main(request):
-    """HTTP Cloud Function."""
+app = Flask(__name__)
 
-    request_json = request.get_json(silent=True)
-    print(f"Configuration to process {request_json}")
-
+@app.route('/create', methods=['POST'])
+def create_key():
+    """Creates a new IAM key for the service account, uploads it to Secret Manager as a new version, 
+    and deletes previous versions in Secret Manager.
+    """
+    request_json = request.get_json()
+    service_account_emails = request_json.get('service_account_email')
+    
     try:
-        if request_json['operation'] == 'create':
-            create(request_json)
-        elif request_json['operation'] == 'delete':
-            delete(request_json)
-        else: 
-            print("Operation not defined. Action not recognized.")
-
+        for service_account_email in service_account_emails:
+            create_and_upload_key(service_account_email)
+        return jsonify({"message": "Key creation process completed successfully"}), 200
     except Exception as e:
-        print("Error:", e)
+        return jsonify({"error": str(e)}), 500
 
-    return ("Process completed successfully", 200)
-
-
-def create(request):
-    """Creates new keys and stores them in Secret Manager."""
-
-    for service_account in request['service_account_email']:
-
-        project_id = service_account.split('@')[1].split('.')[0]
-        secret_name = service_account.split('@')[0]
-
-        # GCP project where the service is located
-        service = googleapiclient.discovery.build("iam", "v1")
-
-        # Create a new key
-        key = (
-            service.projects()
-            .serviceAccounts()
-            .keys()
-            .create(name="projects/-/serviceAccounts/" + service_account, body={})
-            .execute()
-        )
-        print(f"New key for {service_account}!")
-
-        # Upload the new key to Secret Manager
-        client = secretmanager.SecretManagerServiceClient()
-        parent = f"projects/{project_id}"
-        secret_id = secret_name
-        secret_path = client.secret_path(project_id, secret_id)
-
-        response = client.add_secret_version(
-            request={"parent": secret_path, "payload": {"data": key['privateKeyData']}}
-        )
-
-        version_id = response.name.split('/')[-1]
-        print(f"New version of secret {service_account} version: {version_id}")
-
-        # Delete previous versions
-        versions_to_delete = client.list_secret_versions(request={"parent": secret_path})
-        # Check previous versions if they exist and are in ENABLED state
-        for version in versions_to_delete:
-            if version.name != response.name:
-                if version.state == secretmanager.SecretVersion.State.ENABLED:
-                    # Delete the previous version
-                    client.destroy_secret_version(request={"name": version.name})
-                    print(f"Old secret version deleted: {version.name}")
-                    
-        print(f"OK. SA Updated {service_account} in Secret Manager")
-
-    return ("Key creation process completed successfully")
-
-
-def delete(request):
-    """Deletes old keys from Secret Manager and IAM."""
-
-    for service_account in request['service_account_email']:
-      
-        project_id = service_account.split('@')[1].split('.')[0]
-        secret_name = service_account.split('@')[0]
-
-        # GCP project where the service is located
-        service = googleapiclient.discovery.build("iam", "v1")
-
-        client = secretmanager.SecretManagerServiceClient()
-        parent = f"projects/{project_id}/secrets/{secret_name}"
-        response = client.access_secret_version(request={"name": f"{parent}/versions/latest"})
-
-        key_id = json.loads(response.payload.data)['private_key_id']
-        print(f"Valid secret manager key: {key_id}")
-
-        # List current IAM keys
-        key = (
-            service.projects()
-            .serviceAccounts()
-            .keys()
-            .list(name="projects/-/serviceAccounts/" + service_account)
-            .execute()
-        )
-
-        key_list = key.get('keys', [])
-
-        for k in key_list:
-            key_private_id = k['name'].split('/')[-1]
-            if key_private_id != key_id and k.get('keyType') != 'SYSTEM_MANAGED':
-                print(f"IAM key to delete: {k['name']}")
-                service.projects().serviceAccounts().keys().delete(name=k['name']).execute()
+@app.route('/delete', methods=['POST'])
+def delete_key():
+    """Deletes IAM keys that do not match the latest key version stored in Secret Manager."""
+    request_json = request.get_json()
+    service_account_emails = request_json.get('service_account_email')
     
-        print(f"OK: keys deleted for {service_account}")
+    try:
+        for service_account_email in service_account_emails:
+            delete_old_keys(service_account_email)
+        return jsonify({"message": "Key deletion process completed successfully"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/all', methods=['POST'])
+def create_and_delete_key():
+    """Performs both 'create' and 'delete' operations in sequence:
+    Creates a new IAM key, uploads it to Secret Manager, then deletes older IAM keys.
+    """
+    request_json = request.get_json()
+    service_account_emails = request_json.get('service_account_email')
     
-    return ("Key deletion process completed successfully")
+    try:
+        for service_account_email in service_account_emails:
+            create_and_upload_key(service_account_email)
+            delete_old_keys(service_account_email)
+        return jsonify({"message": "All operations (create and delete) completed successfully"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+def create_and_upload_key(service_account_email):
+    """Helper function to create a new key in IAM and upload it to Secret Manager."""
+    project_id = service_account_email.split('@')[1].split('.')[0]
+    secret_name = service_account_email.split('@')[0]
+
+    # Initialize IAM and Secret Manager services
+    iam_service = googleapiclient.discovery.build("iam", "v1")
+    secret_client = secretmanager.SecretManagerServiceClient()
+
+    # Create a new IAM key
+    key = (
+        iam_service.projects()
+        .serviceAccounts()
+        .keys()
+        .create(name=f"projects/-/serviceAccounts/{service_account_email}", body={})
+        .execute()
+    )
+    print(f"New key created for {service_account_email}")
+
+    # Upload the new key to Secret Manager
+    parent = f"projects/{project_id}"
+    secret_path = secret_client.secret_path(project_id, secret_name)
+
+    response = secret_client.add_secret_version(
+        request={"parent": secret_path, "payload": {"data": key['privateKeyData']}}
+    )
+    version_id = response.name.split('/')[-1]
+    print(f"New secret version for {service_account_email} version: {version_id}")
+
+    # Delete previous secret versions
+    versions_to_delete = secret_client.list_secret_versions(request={"parent": secret_path})
+    for version in versions_to_delete:
+        if version.name != response.name:
+            if version.state == secretmanager.SecretVersion.State.ENABLED:
+                secret_client.destroy_secret_version(request={"name": version.name})
+                print(f"Old secret version deleted: {version.name}")
+
+    print(f"Service Account updated in Secret Manager for {service_account_email}")
+
+def delete_old_keys(service_account_email):
+    """Helper function to delete old IAM keys that do not match the latest Secret Manager version."""
+    project_id = service_account_email.split('@')[1].split('.')[0]
+    secret_name = service_account_email.split('@')[0]
+
+    # Initialize IAM and Secret Manager services
+    iam_service = googleapiclient.discovery.build("iam", "v1")
+    secret_client = secretmanager.SecretManagerServiceClient()
+
+    # Access the latest secret version to get the current key ID
+    parent = f"projects/{project_id}/secrets/{secret_name}"
+    response = secret_client.access_secret_version(request={"name": f"{parent}/versions/latest"})
+    latest_key_id = json.loads(response.payload.data)['private_key_id']
+    print(f"Valid key ID from Secret Manager: {latest_key_id}")
+
+    # List current IAM keys and delete those not matching the latest key ID
+    key_list = iam_service.projects().serviceAccounts().keys().list(
+        name=f"projects/-/serviceAccounts/{service_account_email}"
+    ).execute().get('keys', [])
+
+    for key in key_list:
+        key_id = key['name'].split('/')[-1]
+        if key_id != latest_key_id and key.get('keyType') != 'SYSTEM_MANAGED':
+            iam_service.projects().serviceAccounts().keys().delete(name=key['name']).execute()
+            print(f"IAM key deleted: {key['name']}")
+    
+    print(f"Old keys deleted for {service_account_email}")
+
+if __name__ == "__main__":
+    app.run(debug=True)
