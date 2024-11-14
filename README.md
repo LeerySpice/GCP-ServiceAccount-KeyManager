@@ -27,13 +27,81 @@ These roles grant the Cloud Function the necessary permissions to manage service
 
 1. Deploy this function on Google Cloud using the functions framework.
 2. Ensure that the Cloud Function is configured to run under the service account with the roles mentioned above.
-3. Configure the function with a JSON payload specifying the `operation` (`create` or `delete`) and the `service_account_email` to manage.
+3. Configure the function with a JSON payload specifying the `service_account_email` to manage.
 
-## Usage
+## Usage Examples
 
-- Send an HTTP request to the deployed function with a JSON payload. Example:
-  ```json
-  {
-    "operation": "create",
-    "service_account_email": ["your-service-account@your-project.iam.gserviceaccount.com"]
-  }
+Suppose you have a list of service accounts like:
+
+```json
+[
+    "sa1@your-project.iam.gserviceaccount.com",
+    "sa2@your-project.iam.gserviceaccount.com",
+    "sa3@your-project.iam.gserviceaccount.com"
+]
+```
+
+### 1. *create* Option
+
+To create a new key for each service account, upload it to Secret Manager, and delete previous versions in Secret Manager, make a POST request to /create:
+
+```bash
+curl -X POST http://localhost:5000/create -H "Content-Type: application/json" -d '{
+    "service_account_email": [
+        "sa1@your-project.iam.gserviceaccount.com",
+        "sa2@your-project.iam.gserviceaccount.com",
+        "sa3@your-project.iam.gserviceaccount.com"
+    ]
+}'
+```
+Expected Response:
+
+```json
+{
+    "message": "Key creation process completed successfully"
+}
+```
+
+### 2. *delete* Option
+To check the latest key version in Secret Manager, compare it with IAM key versions, and delete those in IAM that do not match the latest version, make a POST request to /delete:
+
+```bash
+curl -X POST http://localhost:5000/delete -H "Content-Type: application/json" -d '{
+    "service_account_email": [
+        "sa1@your-project.iam.gserviceaccount.com",
+        "sa2@your-project.iam.gserviceaccount.com",
+        "sa3@your-project.iam.gserviceaccount.com"
+    ]
+}'
+```
+Expected Response:
+
+```json
+{
+    "message": "Key deletion process completed successfully"
+}
+```
+
+### 3. *all* Option
+To perform both the create and delete operations in sequence for each service account, make a POST request to /all:
+
+```bash
+curl -X POST http://localhost:5000/all -H "Content-Type: application/json" -d '{
+    "service_account_email": [
+        "sa1@your-project.iam.gserviceaccount.com",
+        "sa2@your-project.iam.gserviceaccount.com",
+        "sa3@your-project.iam.gserviceaccount.com"
+    ]
+}'
+```
+Expected Response:
+
+```json
+{
+    "message": "All operations (create and delete) completed successfully"
+}
+```
+
+## Error Handling
+Any exceptions or issues during key creation or deletion are logged, allowing for easy debugging and ensuring that incomplete processes are managed effectively.
+
